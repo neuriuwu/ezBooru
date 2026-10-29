@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ezbooru"
+version = "0.1.0"
+description = "A cross-platform desktop client for image booru sites."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "diskcache>=5.6",
+    "httpx>=0.27",
+    "platformdirs>=4.2",
+    "PySide6>=6.7",
+    "qasync>=0.27",
+]
+
+[project.optional-dependencies]
+build = ["pillow>=10", "pyinstaller>=6.10"]
+
+[project.scripts]
+ezbooru = "ezbooru.main:run"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ezbooru*"]
