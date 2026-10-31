@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QImage, QMouseEvent, QPixmap
 from PySide6.QtWidgets import (
     QGridLayout,
     QLabel,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
@@ -25,6 +28,7 @@ _RATING_COLORS = {
 
 class PostCard(QWidget):
     clicked = Signal(object)
+    favorite_toggled = Signal(object)
     CARD_WIDTH = 194
 
     def __init__(self, post: Post) -> None:
@@ -46,8 +50,21 @@ class PostCard(QWidget):
         self.details = QLabel(self._details_text())
         self.details.setWordWrap(True)
         self.details.setMaximumHeight(42)
+        self.favorite_button = QPushButton("☆")
+        self.favorite_button.setFixedSize(30, 28)
+        self.favorite_button.setToolTip("Add to favorites")
+        self.favorite_button.clicked.connect(lambda: self.favorite_toggled.emit(self.post))
+        self.favorite_button.setParent(self)
+        self.favorite_button.move(self.width() - 40, 8)
+        self.favorite_button.raise_()
         layout.addWidget(self.image)
         layout.addWidget(self.details)
+
+    def set_favorite(self, favorite: bool) -> None:
+        self.favorite_button.setText("★" if favorite else "☆")
+        self.favorite_button.setToolTip(
+            "Remove from favorites" if favorite else "Add to favorites"
+        )
 
     def _details_text(self) -> str:
         color = _RATING_COLORS.get(self.post.rating, "#9ca0ad")
@@ -89,10 +106,12 @@ class PostCard(QWidget):
 
 class PostGrid(QScrollArea):
     post_selected = Signal(object)
+    favorite_toggled = Signal(object)
     need_more = Signal()
 
-    def __init__(self) -> None:
+    def __init__(self, favorite_lookup: Callable[[Post], bool] | None = None) -> None:
         super().__init__()
+        self._favorite_lookup = favorite_lookup or (lambda post: False)
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.content = QWidget()
@@ -117,18 +136,22 @@ class PostGrid(QScrollArea):
                 widget.deleteLater()
         self._layout_card_count = 0
         for post in posts:
-            card = PostCard(post)
-            card.clicked.connect(self.post_selected.emit)
-            self.cards.append(card)
+            self.cards.append(self._create_card(post))
         self._last_request_at = -1
         self._reflow()
 
     def add_post(self, post: Post) -> PostCard:
-        card = PostCard(post)
-        card.clicked.connect(self.post_selected.emit)
+        card = self._create_card(post)
         self.posts.append(post)
         self.cards.append(card)
         self._reflow()
+        return card
+
+    def _create_card(self, post: Post) -> PostCard:
+        card = PostCard(post)
+        card.clicked.connect(self.post_selected.emit)
+        card.favorite_toggled.connect(self.favorite_toggled.emit)
+        card.set_favorite(self._favorite_lookup(post))
         return card
 
     def resizeEvent(self, event) -> None:

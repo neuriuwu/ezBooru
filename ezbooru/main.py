@@ -19,9 +19,9 @@ def run() -> None:
     if app is None:
         app = QApplication(sys.argv)
     if getattr(sys, "frozen", False):
-        icon_path = Path(sys._MEIPASS) / "ezBooru.ico"
+        icon_path = Path(sys._MEIPASS) / "assets" / "ezBooru.png"
     else:
-        icon_path = Path(__file__).resolve().parent.parent / "assets" / "ezBooru.ico"
+        icon_path = Path(__file__).resolve().parent.parent / "assets" / "ezBooru.png"
     app.setWindowIcon(QIcon(str(icon_path)))
     app.setApplicationName("ezBooru")
     app.setOrganizationName("ezBooru")

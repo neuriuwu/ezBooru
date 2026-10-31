@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import httpx
 
@@ -97,6 +97,7 @@ class DownloadManager:
         posts: Iterable[Post],
         output_dir: Path,
         template: str = "{id}.{ext}",
+        on_downloaded: Callable[[Path], None] | None = None,
     ) -> list[Path]:
         semaphore = asyncio.Semaphore(self._parallel_downloads)
         post_destinations: list[tuple[Post, Path]] = []
@@ -112,7 +113,10 @@ class DownloadManager:
 
         async def download_one(post: Post, destination: Path) -> Path:
             async with semaphore:
-                return await self.download_post(post, destination)
+                path = await self.download_post(post, destination)
+                if on_downloaded is not None:
+                    on_downloaded(path)
+                return path
 
         tasks = [
             asyncio.create_task(download_one(post, destination))

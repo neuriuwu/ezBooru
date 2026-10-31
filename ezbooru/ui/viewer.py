@@ -53,6 +53,7 @@ class ZoomView(QGraphicsView):
 class PostViewer(QDialog):
     save_requested = Signal(object)
     open_requested = Signal(object)
+    favorite_requested = Signal(object)
 
     def __init__(self, post: Post, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -84,17 +85,23 @@ class PostViewer(QDialog):
         buttons = QHBoxLayout()
         self.status = QLabel(f"{post.rating.title()} · {post.media_type} · #{post.id}")
         save = QPushButton("Save")
+        self.favorite_button = QPushButton("☆ Favorite")
         copy = QPushButton("Copy Link")
         open_page = QPushButton("Open in Browser")
         save.clicked.connect(lambda: self.save_requested.emit(post))
+        self.favorite_button.clicked.connect(lambda: self.favorite_requested.emit(post))
         copy.clicked.connect(self._copy_link)
         open_page.clicked.connect(lambda: self.open_requested.emit(post))
         buttons.addWidget(self.status)
         buttons.addStretch(1)
         buttons.addWidget(save)
+        buttons.addWidget(self.favorite_button)
         buttons.addWidget(copy)
         buttons.addWidget(open_page)
         root.addLayout(buttons)
+
+    def set_favorite(self, favorite: bool) -> None:
+        self.favorite_button.setText("★ Favorited" if favorite else "☆ Favorite")
 
     def set_image(self, image: QImage) -> None:
         if image.isNull():

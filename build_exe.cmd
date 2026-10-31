@@ -15,7 +15,7 @@ if errorlevel 1 goto failed
 "%PYTHON%" "%PROJECT_ROOT%tools\build_icon.py"
 if errorlevel 1 goto failed
 
-"%PYTHON%" -m PyInstaller --clean --noconfirm --onefile --windowed --name ezBooru --icon "%PROJECT_ROOT%assets\ezBooru.ico" --add-data "%PROJECT_ROOT%assets\ezBooru.ico;." --collect-all qasync "%PROJECT_ROOT%ezbooru\main.py"
+"%PYTHON%" -m PyInstaller --clean --noconfirm --onefile --windowed --name ezBooru --icon "%PROJECT_ROOT%assets\ezBooru.ico" --add-data "%PROJECT_ROOT%assets\ezBooru.png;assets" --collect-all qasync "%PROJECT_ROOT%ezbooru\main.py"
 if errorlevel 1 goto failed
 
 echo Standalone executable created: %PROJECT_ROOT%dist\ezBooru.exe
