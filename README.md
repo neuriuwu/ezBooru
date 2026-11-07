@@ -1,7 +1,7 @@
 # ezBooru
 
 ezBooru is a cross-platform desktop client for browsing and downloading posts
-from Danbooru, Gelbooru, Safebooru, and Moebooru-compatible sites!!!!!!! >.<
+from Danbooru, Gelbooru, Safebooru, Moebooru-compatible sites, and Konachan (Safe).
 
 ![stupid ahh icon </3](assets/ezBooru.png)
 
@@ -42,8 +42,8 @@ operating systems!
 
 The application uses qasync to run its Qt interface and asynchronous HTTP
 requests on one event loop. Image bytes are cached in memory and on disk in the
-platform's user cache directory. Danbooru and Moebooru requests use their
-public JSON APIs; Gelbooru and Safebooru use their DAPI JSON endpoints!
+platform's user cache directory. Danbooru and Moebooru-family requests use their
+public JSON APIs; Gelbooru and Safebooru use their DAPI JSON endpoints.
 
 ## Build a macOS app
 
@@ -61,8 +61,8 @@ artifacts must each be built on their target operating system.
 
 The application uses qasync to run its Qt interface and asynchronous HTTP
 requests on one event loop. Image bytes are cached in memory and on disk in the
-platform's user cache directory. Danbooru and Moebooru requests use their
-public JSON APIs; Gelbooru and Safebooru use their DAPI JSON endpoints!
+platform's user cache directory. Danbooru and Moebooru-family requests use their
+public JSON APIs; Gelbooru and Safebooru use their DAPI JSON endpoints.
 
 ## Search
 
@@ -76,7 +76,10 @@ the down arrow and `K` or the up arrow to change the selected post. Press `S`
 to save the selected post. In the viewer, use the mouse wheel to zoom and drag
 to pan. **Download loaded posts** saves the current results using the editable
 filename template; supported fields are `{id}`, `{artist}`, `{character}`,
-`{rating}`, `{ext}`, and `{booru}`!
+`{rating}`, `{ext}`, and `{booru}`. The rating selector adds `rating:safe`,
+`rating:questionable`, or `rating:explicit` to the query. Tag suggestions appear
+asynchronously while typing, and the gallery can be filtered by landscape,
+portrait, or square dimensions. The dark theme uses a fixed accent color.
 
 Batch downloads are bounded to four concurrent transfers. The GUI's `S` shortcut
 and viewer Save action remain available for individual posts!

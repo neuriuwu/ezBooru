@@ -13,6 +13,12 @@ class Tag:
 
 
 @dataclass(frozen=True, slots=True)
+class TagSuggestion:
+    name: str
+    post_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class Comment:
     id: int
     post_id: int
@@ -44,6 +50,19 @@ class Post:
         if extension == "gif":
             return "animated"
         return "image"
+
+    @property
+    def orientation(self) -> str | None:
+        if (
+            self.width is None
+            or self.height is None
+            or self.width <= 0
+            or self.height <= 0
+        ):
+            return None
+        if self.width == self.height:
+            return "square"
+        return "landscape" if self.width > self.height else "portrait"
 
     @property
     def tags_by_category(self) -> dict[str, tuple[Tag, ...]]:

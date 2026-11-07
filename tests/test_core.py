@@ -9,8 +9,10 @@ import httpx
 from ezbooru.api_client import (
     DanbooruClient,
     GelbooruClient,
+    KonachanClient,
     MoebooruClient,
     SafebooruClient,
+    build_search_query,
 )
 from ezbooru.downloader import DownloadManager, render_filename
 from ezbooru.models import Post
@@ -66,6 +68,19 @@ class APIClientTests(unittest.TestCase):
         self.assertEqual(post.media_type, "animated")
         asyncio.run(client.close())
 
+    def test_konachan_host_and_page_url(self) -> None:
+        client = KonachanClient()
+        post = client.normalize_post(
+            {"id": 21, "file_url": "https://cdn.example/21.png", "tags": "safe_tag"}
+        )
+        self.assertEqual(client.base_url, "https://konachan.net/")
+        self.assertEqual(post.booru, "Konachan (Safe)")
+        self.assertEqual(
+            post.page_url, "https://konachan.net/post/show/21"
+        )
+        self.assertEqual(client.posts_path, "post.json")
+        asyncio.run(client.close())
+
     def test_protocol_relative_media_urls_are_normalized(self) -> None:
         client = DanbooruClient()
         post = client.normalize_post(
@@ -115,6 +130,133 @@ class DownloadTemplateTests(unittest.TestCase):
             render_filename(post, "{unknown}.{ext}")
         with self.assertRaises(ValueError):
             render_filename(post, "../{id}.{ext}")
+
+
+class SearchQueryTests(unittest.TestCase):
+    def test_rating_filter_replaces_existing_rating_tags(self) -> None:
+        self.assertEqual(build_search_query("cat rating:explicit blue_eyes"), "cat blue_eyes")
+        self.assertEqual(build_search_query("cat", "safe"), "cat rating:safe")
+        self.assertEqual(
+            build_search_query("cat rating:safe", "questionable"),
+            "cat rating:questionable",
+        )
+        self.assertEqual(build_search_query("rating:explicit", "all"), "")
+
+    def test_unknown_rating_filter_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            build_search_query("cat", "unknown")
+
+
+class OrientationTests(unittest.TestCase):
+    def test_orientation_uses_image_dimensions_and_handles_missing_sizes(self) -> None:
+        post = Post(
+            id=5,
+            booru="Danbooru",
+            page_url="https://example.test/posts/5",
+            file_url="https://example.test/5.jpg",
+            preview_url="https://example.test/5.jpg",
+            width=1600,
+            height=900,
+        )
+        self.assertEqual(post.orientation, "landscape")
+        self.assertEqual(
+            Post(
+                id=8,
+                booru="Danbooru",
+                page_url="https://example.test/posts/8",
+                file_url="https://example.test/8.jpg",
+                preview_url="https://example.test/8.jpg",
+                width=1000,
+                height=1000,
+            ).orientation,
+            "square",
+        )
+        self.assertEqual(
+            Post(
+                id=6,
+                booru="Danbooru",
+                page_url="https://example.test/posts/6",
+                file_url="https://example.test/6.jpg",
+                preview_url="https://example.test/6.jpg",
+                width=800,
+                height=1200,
+            ).orientation,
+            "portrait",
+        )
+        self.assertIsNone(
+            Post(
+                id=7,
+                booru="Danbooru",
+                page_url="https://example.test/posts/7",
+                file_url="https://example.test/7.jpg",
+                preview_url="https://example.test/7.jpg",
+                width=0,
+                height=0,
+            ).orientation
+        )
+
+
+class TagSuggestionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_konachan_search_uses_moebooru_post_endpoint(self) -> None:
+        requests: list[httpx.Request] = []
+
+        async def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 31,
+                        "file_url": "https://cdn.example/31.jpg",
+                        "tags": "sample_tag",
+                        "rating": "s",
+                    }
+                ],
+            )
+
+        client = KonachanClient()
+        await client.close()
+        client._http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        try:
+            posts = await client.search("sample_tag", page=2)
+            self.assertEqual(requests[0].url.host, "konachan.net")
+            self.assertEqual(requests[0].url.path, "/post.json")
+            self.assertEqual(requests[0].url.params["page"], "2")
+            self.assertEqual(posts[0].page_url, "https://konachan.net/post/show/31")
+        finally:
+            await client.close()
+
+    async def test_engine_tag_endpoints_normalize_suggestions(self) -> None:
+        cases = (
+            (DanbooruClient(), "/tags.json", "search[name_matches]", "blue*"),
+            (GelbooruClient(), "/index.php", "name_pattern", "blue*"),
+            (SafebooruClient(), "/index.php", "name_pattern", "blue*"),
+            (MoebooruClient(), "/tag.json", "name", "blue"),
+            (KonachanClient(), "/tag.json", "name", "blue"),
+        )
+        for client, expected_path, parameter, expected_value in cases:
+            requests: list[httpx.Request] = []
+
+            async def respond(request: httpx.Request) -> httpx.Response:
+                requests.append(request)
+                if isinstance(client, (GelbooruClient, SafebooruClient)):
+                    body = {"tag": [{"name": "blue_eyes", "count": "123"}]}
+                else:
+                    body = [{"name": "blue_eyes", "post_count": 123}]
+                return httpx.Response(200, json=body)
+
+            await client.close()
+            client._http = httpx.AsyncClient(
+                transport=httpx.MockTransport(respond)
+            )
+            try:
+                suggestions = await client.suggest_tags("blue")
+                self.assertEqual(requests[0].url.path, expected_path)
+                self.assertEqual(requests[0].url.params[parameter], expected_value)
+                self.assertEqual(suggestions[0].name, "blue_eyes")
+                self.assertEqual(suggestions[0].post_count, 123)
+            finally:
+                await client.close()
 
 
 class DownloadManagerTests(unittest.IsolatedAsyncioTestCase):

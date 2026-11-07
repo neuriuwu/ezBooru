@@ -6,18 +6,19 @@ import asyncio
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from PySide6.QtCore import QSettings, QUrl
+from PySide6.QtCore import QModelIndex, QSettings, QTimer, QUrl, Qt
 from PySide6.QtGui import (
     QCloseEvent,
-    QColor,
     QDesktopServices,
     QImage,
     QKeySequence,
+    QStandardItem,
+    QStandardItemModel,
     QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication,
-    QColorDialog,
+    QCompleter,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -36,8 +37,10 @@ from ezbooru.api_client import (
     BooruClient,
     DanbooruClient,
     GelbooruClient,
+    KonachanClient,
     MoebooruClient,
     SafebooruClient,
+    build_search_query,
 )
 from ezbooru.cache import ImageCache
 from ezbooru.downloader import DownloadManager
@@ -53,6 +56,7 @@ _CLIENTS: dict[str, type[BooruClient]] = {
     "Gelbooru": GelbooruClient,
     "Safebooru": SafebooruClient,
     "Moebooru (yande.re)": MoebooruClient,
+    "Konachan (Safe)": KonachanClient,
 }
 
 
@@ -62,9 +66,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("ezBooru")
         self.resize(1280, 850)
         self.settings = QSettings("ezBooru", "ezBooru")
+        self.settings.remove("accent")
         self.library = UserLibrary(self.settings)
-        self.accent = self.settings.value("accent", "#8b7bff", str)
-        self.setStyleSheet(dark_stylesheet(self.accent))
+        self.setStyleSheet(dark_stylesheet())
         self.cache = ImageCache()
         self.downloader = DownloadManager()
         self.client: BooruClient | None = None
@@ -72,6 +76,7 @@ class MainWindow(QMainWindow):
         self.current_index = -1
         self.page = 1
         self._search_task: asyncio.Task[None] | None = None
+        self._tag_suggestion_task: asyncio.Task[None] | None = None
         self._thumbnail_tasks: set[asyncio.Task[None]] = set()
         self._thumbnail_semaphore = asyncio.Semaphore(8)
         self._download_tasks: set[asyncio.Task[Any]] = set()
@@ -101,18 +106,40 @@ class MainWindow(QMainWindow):
         self.booru.addItems(_CLIENTS)
         self.query = QLineEdit()
         self.query.setPlaceholderText("Search tags…")
+        self.rating_filter = QComboBox()
+        self.rating_filter.addItem("All ratings", "all")
+        self.rating_filter.addItem("Safe", "safe")
+        self.rating_filter.addItem("Questionable", "questionable")
+        self.rating_filter.addItem("Explicit", "explicit")
+        self.rating_filter.setToolTip("Append the selected rating tag to the search.")
         self.search_button = QPushButton("Search")
-        self.theme_button = QPushButton("Accent")
         toolbar.addWidget(self.booru)
         toolbar.addWidget(self.query, 1)
+        toolbar.addWidget(self.rating_filter)
         toolbar.addWidget(self.search_button)
-        toolbar.addWidget(self.theme_button)
+        self._tag_suggestion_model = QStandardItemModel(self)
+        self._tag_completer = QCompleter(self._tag_suggestion_model, self.query)
+        self._tag_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._tag_completer.setFilterMode(Qt.MatchFlag.MatchStartsWith)
+        self.query.setCompleter(self._tag_completer)
+        self._tag_suggestion_timer = QTimer(self)
+        self._tag_suggestion_timer.setSingleShot(True)
+        self._tag_suggestion_timer.setInterval(250)
+        self._tag_suggestion_timer.timeout.connect(self._request_tag_suggestions)
+        self._tag_suggestion_prefix = ""
+        self._tag_suggestion_context = ""
         self.filename_template = QLineEdit("{artist}/{character}_{id}.{ext}")
         self.filename_template.setToolTip(
             "Supported fields: {id}, {artist}, {character}, {rating}, {ext}, {booru}"
         )
         content_layout.addLayout(toolbar)
         result_tools = QHBoxLayout()
+        result_tools.addWidget(QLabel("Orientation"))
+        self.orientation_filter = QComboBox()
+        self.orientation_filter.addItems(
+            ["All orientations", "Landscape", "Portrait", "Square"]
+        )
+        result_tools.addWidget(self.orientation_filter)
         result_tools.addWidget(QLabel("Filename"))
         result_tools.addWidget(self.filename_template, 1)
         content_layout.addLayout(result_tools)
@@ -126,8 +153,12 @@ class MainWindow(QMainWindow):
 
         self.search_button.clicked.connect(self.start_search)
         self.query.returnPressed.connect(self.start_search)
+        self.query.textEdited.connect(self._schedule_tag_suggestions)
+        self._tag_completer.activated[QModelIndex].connect(
+            self._insert_tag_suggestion
+        )
         self.booru.currentTextChanged.connect(self._change_client)
-        self.theme_button.clicked.connect(self._choose_accent)
+        self.orientation_filter.currentTextChanged.connect(self._set_orientation)
         self.grid.post_selected.connect(self.open_post)
         self.grid.favorite_toggled.connect(self._toggle_favorite)
         self.grid.need_more.connect(self._load_next_page)
@@ -149,14 +180,20 @@ class MainWindow(QMainWindow):
     def _change_client(self, name: str) -> None:
         previous = self.client
         old_search = self._search_task
+        old_suggestions = self._tag_suggestion_task
+        self._tag_suggestion_timer.stop()
         old_thumbnails = self._cancel_thumbnail_tasks()
         if old_search is not None and not old_search.done():
             old_search.cancel()
+        if old_suggestions is not None and not old_suggestions.done():
+            old_suggestions.cancel()
         self.client = _CLIENTS[name]()
         if previous is not None:
             self._showing_favorites = False
             asyncio.create_task(
-                self._close_previous_client(previous, old_search, old_thumbnails)
+                self._close_previous_client(
+                    previous, old_search, old_suggestions, old_thumbnails
+                )
             )
             self.posts.clear()
             self.current_index = -1
@@ -168,11 +205,12 @@ class MainWindow(QMainWindow):
         self,
         client: BooruClient,
         search_task: asyncio.Task[None] | None,
+        suggestion_task: asyncio.Task[None] | None,
         thumbnail_tasks: list[asyncio.Task[None]],
     ) -> None:
         pending = [
             task
-            for task in [search_task, *thumbnail_tasks]
+            for task in [search_task, suggestion_task, *thumbnail_tasks]
             if task is not None
         ]
         if pending:
@@ -192,11 +230,23 @@ class MainWindow(QMainWindow):
         save.activated.connect(self._save_selected)
 
     def _select_relative(self, delta: int) -> None:
-        if not self.posts:
+        visible_indices = [
+            index
+            for index, post in enumerate(self.posts)
+            if self.grid.is_post_visible(post)
+        ]
+        if not visible_indices:
             return
         if 0 <= self.current_index < len(self.grid.cards):
             self.grid.cards[self.current_index].set_selected(False)
-        self.current_index = min(max(self.current_index + delta, 0), len(self.posts) - 1)
+        try:
+            current_position = visible_indices.index(self.current_index)
+        except ValueError:
+            current_position = -1 if delta >= 0 else len(visible_indices)
+        next_position = min(
+            max(current_position + delta, 0), len(visible_indices) - 1
+        )
+        self.current_index = visible_indices[next_position]
         self.grid.cards[self.current_index].set_selected(True)
         self.status.setText(f"Selected post #{self.posts[self.current_index].id}")
 
@@ -204,14 +254,12 @@ class MainWindow(QMainWindow):
         if 0 <= self.current_index < len(self.posts):
             self._save_post(self.posts[self.current_index])
 
-    def _choose_accent(self) -> None:
-        color = QColorDialog.getColor(QColor(self.accent), self, "Choose accent color")
-        if color.isValid():
-            self.accent = color.name()
-            self.settings.setValue("accent", self.accent)
-            self.setStyleSheet(dark_stylesheet(self.accent))
-
     def start_search(self) -> None:
+        self._tag_suggestion_timer.stop()
+        if self._tag_suggestion_task is not None:
+            self._tag_suggestion_task.cancel()
+        self._tag_suggestion_model.clear()
+        self._tag_completer.popup().hide()
         if self._search_task is not None and not self._search_task.done():
             self._search_task.cancel()
         self._save_blacklist(self.sidebar.blacklist.text())
@@ -222,6 +270,74 @@ class MainWindow(QMainWindow):
         self.grid.set_posts([])
         self._cancel_thumbnail_tasks()
         self._search_task = asyncio.create_task(self._search_page(replace=True))
+
+    def _build_query(self) -> str:
+        return build_search_query(
+            self.query.text(), str(self.rating_filter.currentData())
+        )
+
+    def _set_orientation(self, orientation: str) -> None:
+        normalized = orientation.casefold().replace(" orientations", "")
+        if 0 <= self.current_index < len(self.grid.cards):
+            self.grid.cards[self.current_index].set_selected(False)
+        self.grid.set_orientation(normalized)
+        if 0 <= self.current_index < len(self.posts):
+            if not self.grid.is_post_visible(self.posts[self.current_index]):
+                self.current_index = -1
+
+    def _schedule_tag_suggestions(self, text: str) -> None:
+        self._tag_suggestion_timer.stop()
+        if self._tag_suggestion_task is not None:
+            self._tag_suggestion_task.cancel()
+        self._tag_suggestion_model.clear()
+        self._tag_completer.popup().hide()
+        if not text or text[-1].isspace():
+            return
+        tokens = text.split()
+        prefix = tokens[-1] if tokens else ""
+        if len(prefix) < 2 or ":" in prefix:
+            return
+        self._tag_suggestion_prefix = prefix
+        self._tag_suggestion_context = text[: len(text) - len(prefix)]
+        self._tag_suggestion_timer.start()
+
+    def _request_tag_suggestions(self) -> None:
+        if self.client is not None:
+            self._tag_suggestion_task = asyncio.create_task(
+                self._load_tag_suggestions(self.client, self._tag_suggestion_prefix)
+            )
+
+    async def _load_tag_suggestions(self, client: BooruClient, prefix: str) -> None:
+        try:
+            suggestions = await client.suggest_tags(prefix)
+        except asyncio.CancelledError:
+            raise
+        except BooruAPIError as exc:
+            if client is self.client:
+                self.status.setText(f"Tag suggestions unavailable: {exc}")
+        else:
+            current_token = self.query.text().split()[-1:] or [""]
+            if client is not self.client or current_token[0] != prefix:
+                return
+            self._tag_suggestion_model.clear()
+            for suggestion in suggestions:
+                item = QStandardItem(
+                    f"{suggestion.name}  ·  {suggestion.post_count:,} posts"
+                )
+                item.setData(suggestion.name, Qt.ItemDataRole.UserRole)
+                self._tag_suggestion_model.appendRow(item)
+            if suggestions:
+                self._tag_completer.complete()
+            else:
+                self._tag_completer.popup().hide()
+
+    def _insert_tag_suggestion(self, index: QModelIndex) -> None:
+        tag = index.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(tag, str):
+            return
+        query = f"{self._tag_suggestion_context}{tag} "
+        self.query.setText(query)
+        self.query.setCursorPosition(len(query))
 
     def _cancel_thumbnail_tasks(self) -> list[asyncio.Task[None]]:
         tasks = list(self._thumbnail_tasks)
@@ -239,7 +355,7 @@ class MainWindow(QMainWindow):
             results: list[Post] = []
             while True:
                 page_results = await self.client.search(
-                    self.query.text().strip(), self.page
+                    self._build_query(), self.page
                 )
                 results = filter_blacklisted(
                     page_results, self.library.blacklisted_tags
@@ -330,7 +446,7 @@ class MainWindow(QMainWindow):
 
     def _save_search(self) -> None:
         added = self.library.save_search(
-            self.booru.currentText(), self.query.text()
+            self.booru.currentText(), self._build_query()
         )
         if added:
             self.sidebar.set_saved_searches(self.library.saved_searches)
@@ -342,7 +458,25 @@ class MainWindow(QMainWindow):
         index = self.booru.findText(search["booru"])
         if index >= 0:
             self.booru.setCurrentIndex(index)
-        self.query.setText(search["query"])
+        rating_tags = {
+            f"rating:{self.rating_filter.itemData(row)}": self.rating_filter.itemData(
+                row
+            )
+            for row in range(1, self.rating_filter.count())
+        }
+        tokens = search["query"].split()
+        saved_rating = next(
+            (
+                rating_tags[token.casefold()]
+                for token in tokens
+                if token.casefold() in rating_tags
+            ),
+            "all",
+        )
+        self.rating_filter.setCurrentIndex(self.rating_filter.findData(saved_rating))
+        self.query.setText(
+            " ".join(token for token in tokens if token.casefold() not in rating_tags)
+        )
         self.start_search()
 
     def _remove_saved_search(self, index: int) -> None:
@@ -420,7 +554,7 @@ class MainWindow(QMainWindow):
         if self._showing_favorites:
             self.status.setText("Return to search results before downloading all matches.")
             return
-        if self.client is None or not self.query.text().strip():
+        if self.client is None or not self._build_query():
             self.status.setText("Enter a search query before downloading all matches.")
             return
         answer = QMessageBox.question(
@@ -513,7 +647,7 @@ class MainWindow(QMainWindow):
         if self.client is None:
             return
         output_dir = Path(self._download_directory)
-        query = self.query.text().strip()
+        query = self._build_query()
         blacklist = self.library.blacklisted_tags
         seen: set[tuple[str, int]] = set()
         downloaded = 0
@@ -555,8 +689,11 @@ class MainWindow(QMainWindow):
         self.status.setText(f"Downloaded {downloaded} posts to {output_dir}")
 
     async def shutdown(self) -> None:
+        self._tag_suggestion_timer.stop()
         if self._search_task is not None:
             self._search_task.cancel()
+        if self._tag_suggestion_task is not None:
+            self._tag_suggestion_task.cancel()
         for task in self._thumbnail_tasks:
             task.cancel()
         for task in self._download_tasks:
@@ -565,6 +702,7 @@ class MainWindow(QMainWindow):
             task
             for task in [
                 self._search_task,
+                self._tag_suggestion_task,
                 *self._thumbnail_tasks,
                 *self._download_tasks,
             ]

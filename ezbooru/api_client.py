@@ -10,7 +10,7 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 
-from ezbooru.models import Comment, Post, Tag, TagCategory
+from ezbooru.models import Comment, Post, Tag, TagCategory, TagSuggestion
 
 _DANBOORU_TAG_CATEGORIES: dict[int, TagCategory] = {
     0: "general",
@@ -25,6 +25,26 @@ _RATINGS = {
     "q": "questionable",
     "e": "explicit",
 }
+_RATING_SEARCH_TAGS = {
+    "safe": "rating:safe",
+    "questionable": "rating:questionable",
+    "explicit": "rating:explicit",
+}
+
+
+def build_search_query(tags: str, rating: str = "all") -> str:
+    """Build a search query with at most one UI-selected rating tag."""
+    normalized_rating = rating.casefold()
+    if normalized_rating not in {"all", *_RATING_SEARCH_TAGS}:
+        raise ValueError(f"Unsupported rating filter: {rating}")
+    query_tags = [
+        tag
+        for tag in tags.split()
+        if tag.casefold() not in _RATING_SEARCH_TAGS.values()
+    ]
+    if normalized_rating != "all":
+        query_tags.append(_RATING_SEARCH_TAGS[normalized_rating])
+    return " ".join(query_tags)
 
 
 class BooruAPIError(Exception):
@@ -88,6 +108,18 @@ class BooruClient(ABC):
             raise BooruAPIError(f"{self.name} returned an unexpected post-list format.")
         return [self.normalize_post(item) for item in data if isinstance(item, Mapping)]
 
+    async def suggest_tags(self, prefix: str, limit: int = 10) -> list[TagSuggestion]:
+        if limit < 1:
+            raise ValueError("limit must be at least one.")
+        normalized_prefix = prefix.strip()
+        if not normalized_prefix:
+            return []
+        data = await self._get_json(
+            self.tags_path,
+            self.tag_search_params(normalized_prefix, min(limit, 50)),
+        )
+        return _normalize_tag_suggestions(data, limit)
+
     async def get_comments(self, post_id: int) -> list[Comment]:
         data = await self._get_json("comments.json", {"post_id": post_id})
         if not isinstance(data, list):
@@ -116,6 +148,15 @@ class BooruClient(ABC):
     def search_params(self, tags: str, page: int, limit: int) -> dict[str, str | int]:
         raise NotImplementedError
 
+    @property
+    @abstractmethod
+    def tags_path(self) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
+    def tag_search_params(self, prefix: str, limit: int) -> dict[str, str | int]:
+        raise NotImplementedError
+
     @abstractmethod
     def normalize_post(self, item: Mapping[str, Any]) -> Post:
         raise NotImplementedError
@@ -131,6 +172,17 @@ class DanbooruClient(BooruClient):
 
     def search_params(self, tags: str, page: int, limit: int) -> dict[str, str | int]:
         return {"tags": tags, "page": page, "limit": min(limit, 200)}
+
+    @property
+    def tags_path(self) -> str:
+        return "tags.json"
+
+    def tag_search_params(self, prefix: str, limit: int) -> dict[str, str | int]:
+        return {
+            "search[name_matches]": f"{prefix}*",
+            "search[order]": "count",
+            "limit": limit,
+        }
 
     def normalize_post(self, item: Mapping[str, Any]) -> Post:
         tag_objects = item.get("tags", [])
@@ -168,6 +220,20 @@ class GelbooruClient(BooruClient):
             "limit": min(limit, 100),
         }
 
+    @property
+    def tags_path(self) -> str:
+        return "index.php"
+
+    def tag_search_params(self, prefix: str, limit: int) -> dict[str, str | int]:
+        return {
+            "page": "dapi",
+            "s": "tag",
+            "q": "index",
+            "json": 1,
+            "name_pattern": f"{prefix}*",
+            "limit": limit,
+        }
+
     def normalize_post(self, item: Mapping[str, Any]) -> Post:
         return _make_post(
             item,
@@ -194,6 +260,13 @@ class MoebooruClient(BooruClient):
     def search_params(self, tags: str, page: int, limit: int) -> dict[str, str | int]:
         return {"tags": tags, "page": page, "limit": min(limit, 100)}
 
+    @property
+    def tags_path(self) -> str:
+        return "tag.json"
+
+    def tag_search_params(self, prefix: str, limit: int) -> dict[str, str | int]:
+        return {"name": prefix, "limit": limit}
+
     def normalize_post(self, item: Mapping[str, Any]) -> Post:
         return _make_post(
             item,
@@ -202,6 +275,11 @@ class MoebooruClient(BooruClient):
             _plain_tags(item.get("tags")),
             f"post/show/{_as_int(item.get('id'))}",
         )
+
+
+class KonachanClient(MoebooruClient):
+    name = "Konachan (Safe)"
+    default_url = "https://konachan.net/"
 
 
 def _plain_tags(value: Any) -> list[Tag]:
@@ -260,6 +338,33 @@ def _as_int(value: Any, default: int = 0) -> int:
 
 def _optional_int(value: Any) -> int | None:
     return None if value is None else _as_int(value)
+
+
+def _normalize_tag_suggestions(data: Any, limit: int) -> list[TagSuggestion]:
+    if isinstance(data, Mapping):
+        for key in ("tags", "tag", "data"):
+            if key in data:
+                data = data[key]
+                break
+        if isinstance(data, Mapping) and "name" in data:
+            data = [data]
+    if not isinstance(data, Sequence) or isinstance(data, (str, bytes)):
+        raise BooruAPIError("The booru returned an unexpected tag-list format.")
+    suggestions: list[TagSuggestion] = []
+    seen: set[str] = set()
+    for item in data:
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("name", "")).strip()
+        key = name.casefold()
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        count = item.get("post_count", item.get("count", item.get("posts", 0)))
+        suggestions.append(TagSuggestion(name, _as_int(count)))
+        if len(suggestions) >= limit:
+            break
+    return suggestions
 
 
 def _absolute_url(value: str, base_url: str) -> str:

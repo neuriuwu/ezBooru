@@ -121,20 +121,20 @@ class PostGrid(QScrollArea):
         self.setWidget(self.content)
         self.cards: list[PostCard] = []
         self.posts: list[Post] = []
+        self.orientation = "all"
         self._columns = 0
-        self._layout_card_count = 0
+        self._layout_cards: tuple[PostCard, ...] = ()
         self._last_request_at = -1
         self.verticalScrollBar().valueChanged.connect(self._check_bottom)
 
     def set_posts(self, posts: list[Post]) -> None:
         self.posts = list(posts)
+        for card in self.cards:
+            card.deleteLater()
         self.cards.clear()
         while self.layout.count():
-            item = self.layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        self._layout_card_count = 0
+            self.layout.takeAt(0)
+        self._layout_cards = ()
         for post in posts:
             self.cards.append(self._create_card(post))
         self._last_request_at = -1
@@ -147,8 +147,27 @@ class PostGrid(QScrollArea):
         self._reflow()
         return card
 
+    def set_orientation(self, orientation: str) -> None:
+        normalized = orientation.casefold()
+        if normalized not in {"all", "landscape", "portrait", "square"}:
+            raise ValueError(f"Unsupported orientation: {orientation}")
+        if normalized == self.orientation:
+            return
+        self.orientation = normalized
+        self._reflow()
+
+    def is_post_visible(self, post: Post) -> bool:
+        return self.orientation == "all" or post.orientation == self.orientation
+
+    @property
+    def visible_cards(self) -> list[PostCard]:
+        return [card for card in self.cards if self.is_post_visible(card.post)]
+
     def _create_card(self, post: Post) -> PostCard:
         card = PostCard(post)
+        card.setParent(self.content)
+        if not self.is_post_visible(post):
+            card.hide()
         card.clicked.connect(self.post_selected.emit)
         card.favorite_toggled.connect(self.favorite_toggled.emit)
         card.set_favorite(self._favorite_lookup(post))
@@ -160,14 +179,18 @@ class PostGrid(QScrollArea):
 
     def _reflow(self) -> None:
         columns = max(1, (self.viewport().width() - 24) // (PostCard.CARD_WIDTH + 12))
-        if columns == self._columns and len(self.cards) == self._layout_card_count:
+        visible_cards = self.visible_cards
+        if columns == self._columns and tuple(visible_cards) == self._layout_cards:
             return
         self._columns = columns
         while self.layout.count():
             self.layout.takeAt(0)
-        for index, card in enumerate(self.cards):
+        visible_set = set(visible_cards)
+        for card in self.cards:
+            card.setVisible(card in visible_set)
+        for index, card in enumerate(visible_cards):
             self.layout.addWidget(card, index // columns, index % columns)
-        self._layout_card_count = len(self.cards)
+        self._layout_cards = tuple(visible_cards)
         self.layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         QTimer.singleShot(
             0, lambda: self._check_bottom(self.verticalScrollBar().value())
