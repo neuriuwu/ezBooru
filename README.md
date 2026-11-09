@@ -5,7 +5,7 @@ from Danbooru, Gelbooru, Safebooru, Moebooru-compatible sites, and Konachan (Saf
 
 ![stupid ahh icon </3](assets/ezBooru.png)
 
-
+## IT IS RECOMMENDED TO USE CLOUDFLARE 1.1.1.1 IF YOUR ISP BLOCKS BOORUS!
 ## Run
 You can download the executable file from releases!! mwahhh <3
 OR do this!
